@@ -1,0 +1,86 @@
+﻿@using System.IO
+@using System.Reflection
+@using Microsoft.CodeAnalysis
+@using Microsoft.CodeAnalysis.Emit
+@using Microsoft.CodeAnalysis.CSharp
+@using our_good_app.Pages
+@page "/counter"
+@inject HttpClient Http
+@inject IJSRuntime JavaScriptRuntime
+
+<PageTitle>Counter</PageTitle>
+
+<h1>Counter</h1>
+
+<p role="status">Current count: @currentCount</p>
+
+<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+
+@code {
+    private int currentCount = 0;
+
+    private async Task IncrementCount()
+    {
+        SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(@"
+public class MyClass
+{
+    public static int DoMath(int x, int y) => x + (x * y);
+}"
+        );
+
+        MetadataReference[] references =
+        [
+            MetadataReference.CreateFromImage(await Http.GetByteArrayAsync("dll/System.Private.CoreLib.dll"))
+        ];
+
+        CSharpCompilation compilation = CSharpCompilation.Create(
+            "OurGoodAssemblyForTesting",
+            syntaxTrees: new[] { syntaxTree },
+            references: references
+        )
+        .WithOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        using (var ms = new MemoryStream())
+        {
+            EmitResult result = compilation.Emit(ms);
+
+            if (!result.Success)
+            {
+                IEnumerable<Diagnostic> failures = result.Diagnostics.Where(diagnostic => 
+                    diagnostic.IsWarningAsError || 
+                    diagnostic.Severity == DiagnosticSeverity.Error);
+
+                string message =
+                    string.Join(", ", failures.Select(failure => $"{failure.Id}: {failure.GetMessage()}"));
+                throw new InvalidOperationException(message);
+            }
+
+            ms.Seek(0, SeekOrigin.Begin);
+            Assembly assembly = Assembly.Load(ms.ToArray());
+
+            foreach (Type type in assembly.GetTypes())
+            {
+                if (type.Name == "MyClass")
+                {
+                    MethodInfo? methodInfo = type.GetMethod("DoMath");
+                    if (methodInfo is not null)
+                    {
+                        int? invokeResult = (int?)methodInfo.Invoke(null, [5, 5]);
+                        if (invokeResult != 30)
+                        {
+                            throw new InvalidOperationException($"expected 30 got {result}");
+                        }
+                        else
+                        {
+                            await JavaScriptRuntime.InvokeVoidAsync(
+                                "console.log",
+                                "Success! The result of compilation/method invocatino equals 30."
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        currentCount++;
+    }
+}
